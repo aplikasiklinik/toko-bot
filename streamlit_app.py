@@ -1,7 +1,6 @@
 import streamlit as st
 import ccxt
 import pandas as pd
-import pandas_ta as ta
 import time
 import json
 import os
@@ -12,17 +11,18 @@ from datetime import datetime
 # --- 1. KONFIGURASI HALAMAN ---
 st.set_page_config(page_title="Tokocrypto Manager", layout="wide", page_icon="💎")
 
-# CSS Styling
+# CSS Styling (Agar tampilan rapi & Tombol Full Width)
 st.markdown("""
 <style>
     .stApp { background-color: #0E1117; }
     div.stButton > button { width: 100%; border-radius: 5px; height: 3em; font-weight: bold; }
-    .success-box { padding: 10px; background-color: #1b5e20; border-radius: 5px; color: white; margin-bottom: 10px; }
-    .warning-box { padding: 10px; background-color: #ff6f00; border-radius: 5px; color: white; margin-bottom: 10px; }
+    .success-box { padding: 10px; background-color: #1b5e20; border-radius: 5px; color: white; margin-bottom: 10px; text-align: center; }
+    .warning-box { padding: 10px; background-color: #ff6f00; border-radius: 5px; color: white; margin-bottom: 10px; text-align: center; }
+    .card { background-color: #262730; padding: 15px; border-radius: 10px; border: 1px solid #444; margin-bottom: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. FILE HANDLING (.env & JSON) ---
+# --- 2. FILE HANDLING ---
 DB_FILE = "posisi_multi.json"
 ENV_FILE = ".env"
 
@@ -36,16 +36,9 @@ def load_positions():
 def save_positions(data):
     with open(DB_FILE, 'w') as f: json.dump(data, f, indent=4)
 
-# Fungsi Log
-def add_log(msg, type="info"):
-    if 'logs' not in st.session_state: st.session_state['logs'] = []
-    ts = datetime.now().strftime("%H:%M:%S")
-    st.session_state['logs'].insert(0, {"Waktu": ts, "Tipe": type, "Pesan": msg})
-    if len(st.session_state['logs']) > 50: st.session_state['logs'] = st.session_state['logs'][:50]
-
-# --- 3. INIT API ---
 def init_exchange(api, secret):
     try:
+        if not api or not secret: return None
         return ccxt.tokocrypto({
             'apiKey': api, 'secret': secret,
             'enableRateLimit': True,
@@ -53,80 +46,67 @@ def init_exchange(api, secret):
         })
     except: return None
 
-# --- SIDEBAR LOGIC (DIPERBAIKI) ---
-load_dotenv(override=True) # Load awal
+# --- SIDEBAR: PENGATURAN ---
+load_dotenv(override=True) # Load .env saat script mulai
 
 with st.sidebar:
     st.header("🎛️ PENGATURAN")
     
-    # --- BAGIAN 1: API KEY (.ENV) ---
-    st.subheader("1. Kredensial API")
-    
-    # Uploader .env
-    env_upload = st.file_uploader("Upload .env (API Key)", type=['env', 'txt'], key="env_upl")
-    if env_upload is not None:
-        # Baca dan Simpan File
-        stringio = StringIO(env_upload.getvalue().decode("utf-8"))
-        content = stringio.read()
-        with open(ENV_FILE, "w") as f:
-            f.write(content)
+    # === A. API KEY ===
+    with st.expander("1. Kredensial API", expanded=True):
+        # Upload .env
+        env_upload = st.file_uploader("Upload .env", type=['env', 'txt'], key="env_upl")
+        if env_upload is not None:
+            stringio = StringIO(env_upload.getvalue().decode("utf-8"))
+            content = stringio.read()
+            with open(ENV_FILE, "w") as f: f.write(content)
+            load_dotenv(override=True)
+            st.success("✅ .env Tersimpan! Reloading...")
+            time.sleep(1)
+            st.rerun()
+
+        # Input / Display
+        SYS_API = os.getenv('TOKO_API_KEY')
+        SYS_SECRET = os.getenv('TOKO_SECRET_KEY')
         
-        # Load ulang environment variable SEKETIKA
-        load_dotenv(override=True)
-        st.success("✅ .env Berhasil Disimpan!")
-        time.sleep(1)
-        st.rerun() # Refresh halaman agar variabel terbaca
+        api_key = st.text_input("API Key", value=SYS_API if SYS_API else "", type="password")
+        secret_key = st.text_input("Secret Key", value=SYS_SECRET if SYS_SECRET else "", type="password")
 
-    # Cek apakah variabel sudah ada di sistem
-    SYS_API = os.getenv('TOKO_API_KEY')
-    SYS_SECRET = os.getenv('TOKO_SECRET_KEY')
-
-    # Input manual (Otomatis terisi jika .env berhasil di-load)
-    api_key = st.text_input("API Key", value=SYS_API if SYS_API else "", type="password")
-    secret_key = st.text_input("Secret Key", value=SYS_SECRET if SYS_SECRET else "", type="password")
-
-    if api_key and secret_key:
-        st.markdown('<div class="success-box">API Key Terdeteksi 👌</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="warning-box">API Key Belum Diisi ❌</div>', unsafe_allow_html=True)
+        if api_key and secret_key:
+            st.markdown('<div class="success-box">API Key Terdeteksi 👌</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="warning-box">API Key Kosong ❌</div>', unsafe_allow_html=True)
 
     st.divider()
 
-    # --- BAGIAN 2: JSON DOMPET ---
-    st.subheader("2. File Dompet JSON")
-    
-    json_upload = st.file_uploader("Upload posisi_multi.json", type=['json'], key="json_upl")
-    
-    # Tombol Proses (Hanya muncul jika file dipilih)
-    if json_upload is not None:
-        if st.button("📥 TERAPKAN FILE JSON", type="primary"):
-            try:
-                # Baca JSON
-                data_json = json.load(json_upload)
-                
-                # Validasi sederhana
-                if isinstance(data_json, list):
-                    save_positions(data_json) # Simpan ke file lokal
-                    st.success(f"✅ Berhasil import {len(data_json)} koin!")
-                    time.sleep(1)
-                    st.rerun() # Refresh halaman untuk menampilkan data
-                else:
-                    st.error("Format JSON salah (harus dimulai dengan [ ... ] )")
-            except Exception as e:
-                st.error(f"Error membaca file: {e}")
+    # === B. IMPORT JSON ===
+    with st.expander("2. File Dompet JSON", expanded=True):
+        json_upload = st.file_uploader("Upload posisi_multi.json", type=['json'], key="json_upl")
+        
+        if json_upload is not None:
+            if st.button("📥 TERAPKAN FILE JSON", type="primary"):
+                try:
+                    data_json = json.load(json_upload)
+                    if isinstance(data_json, list):
+                        save_positions(data_json)
+                        st.success(f"✅ Import {len(data_json)} koin sukses!")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("Format JSON salah (Harus List)")
+                except Exception as e:
+                    st.error(f"Error: {e}")
 
-    # Indikator Database Lokal
-    curr_db = load_positions()
-    if len(curr_db) > 0:
-        st.caption(f"💾 Database Lokal: {len(curr_db)} Posisi Tersimpan.")
-    else:
-        st.caption("💾 Database Lokal: Kosong.")
+        # Status Database Lokal
+        curr_db = load_positions()
+        st.caption(f"💾 Database Lokal: {len(curr_db)} Posisi.")
 
     st.divider()
     
-    # --- BAGIAN 3: TOMBOL KONTROL ---
-    start_btn = st.button("MULAI BOT")
-    stop_btn = st.button("STOP BOT")
+    # === C. KONTROL BOT ===
+    c1, c2 = st.columns(2)
+    start_btn = c1.button("MULAI")
+    stop_btn = c2.button("STOP")
     
     if start_btn: 
         st.session_state['active'] = True
@@ -135,102 +115,102 @@ with st.sidebar:
         st.session_state['active'] = False
         st.rerun()
 
-# --- MAIN PAGE LOGIC ---
+# --- MAIN PAGE ---
 st.title("💎 Tokocrypto Dashboard")
 
 if 'active' not in st.session_state: st.session_state['active'] = False
 
-# 1. LOAD DATA POSISI (Selalu diload agar terlihat walau bot mati)
+# 1. Load Data
 active_pos = load_positions()
-
-# 2. TAMPILKAN STATUS DATABASE JSON (Agar user tahu file masuk/tidak)
-if active_pos:
-    st.success(f"📂 File JSON Terbaca: {len(active_pos)} koin siap ditradingkan.")
-else:
-    st.warning("📂 Belum ada data posisi. Silakan Upload JSON atau Scan API.")
-
-# 3. CEK KONEKSI API
 exchange = init_exchange(api_key, secret_key)
-if not exchange:
-    st.error("⚠️ API Key belum valid. Bot hanya akan menampilkan data JSON (Mode Read-Only).")
 
-# 4. CONTAINER UTAMA
+# 2. Status Bar Atas
+if active_pos:
+    st.success(f"📂 STATUS: {len(active_pos)} koin dalam pantauan.")
+else:
+    st.warning("📂 STATUS: Dompet kosong. Silakan upload JSON.")
+
+# 3. Konten Utama
 placeholder = st.empty()
 
-# JIKA BOT STOP (Tampilan Statis)
+# --- MODE STOP (PREVIEW) ---
 if not st.session_state['active']:
     with placeholder.container():
-        st.info("Tekan tombol 'MULAI BOT' di sidebar untuk mengaktifkan refresh otomatis.")
+        st.info("Bot sedang ISTIRAHAT. Tekan 'MULAI' di sidebar untuk live trading.")
         
-        # Tampilkan Tabel Data JSON mentah agar user yakin data masuk
         if active_pos:
-            st.markdown("### Preview Data JSON:")
-            df_preview = pd.DataFrame(active_pos)
-            st.dataframe(df_preview, use_container_width=True)
+            st.subheader("📋 Preview Data (Static)")
+            # MENGGUNAKAN st.table AGAR LEBIH STABIL (MENGHINDARI ERROR BROWSER)
+            df = pd.DataFrame(active_pos)
+            st.table(df) 
 
-# JIKA BOT AKTIF (Looping)
+# --- MODE START (LIVE LOOP) ---
 else:
-    # Loop Refresh
     while st.session_state['active']:
         with placeholder.container():
-            # Reload data terbaru dari file
-            active_pos = load_positions()
-            
-            # --- A. INFO SALDO (Perlu API) ---
-            free_usdt = 0
-            if exchange:
-                try:
+            # Header Saldo
+            try:
+                if exchange:
                     bal = exchange.fetch_balance()
-                    free_usdt = bal['USDT']['free']
-                    st.metric("Saldo USDT (Exchange)", f"{free_usdt:.2f}")
-                except Exception as e:
-                    st.warning(f"Gagal ambil saldo: {e}")
+                    usdt = bal['USDT']['free']
+                    st.metric("Saldo USDT", f"${usdt:.2f}")
+                else:
+                    st.warning("API Key Invalid / Koneksi Gagal")
+            except: pass
 
             st.divider()
 
-            # --- B. PORTOFOLIO ---
+            # Grid Tampilan Koin
             if active_pos:
-                st.subheader(f"🔥 Live Monitoring ({len(active_pos)} Koin)")
                 cols = st.columns(3)
                 for i, pos in enumerate(active_pos):
                     with cols[i % 3]:
+                        # Style Kartu Manual (HTML)
                         with st.container(border=True):
-                            st.markdown(f"**{pos['symbol']}**")
+                            st.markdown(f"### {pos['symbol']}")
                             
-                            current_price = 0
-                            # Coba ambil harga live jika API ada
-                            if exchange:
-                                try:
-                                    tik = exchange.fetch_ticker(pos['symbol'])
-                                    current_price = tik['last']
-                                except: pass
+                            # Ambil Harga Live
+                            live_price = 0
+                            try:
+                                if exchange:
+                                    tk = exchange.fetch_ticker(pos['symbol'])
+                                    live_price = tk['last']
+                            except: pass
                             
-                            # Tampilkan Data dari JSON
+                            # Tampilkan Data
                             c1, c2 = st.columns(2)
-                            c1.caption("Entry JSON"); c1.write(pos['buy_price'])
+                            c1.caption("Entry"); c1.write(f"{pos['buy_price']}")
                             
-                            if current_price > 0:
-                                c2.caption("Harga Live"); c2.write(current_price)
-                                # Hitung PnL
-                                pnl = (current_price - pos['buy_price']) * pos['quantity']
-                                color = "green" if pnl >= 0 else "red"
-                                st.markdown(f"<h4 style='color:{color}'>${pnl:.2f}</h4>", unsafe_allow_html=True)
+                            if live_price > 0:
+                                c2.caption("Live"); c2.write(f"{live_price}")
                                 
-                                # Logic Progress Bar
-                                if pos['tp'] and pos['sl']:
-                                    denom = pos['tp'] - pos['sl']
-                                    if denom != 0:
-                                        prog = (current_price - pos['sl']) / denom
-                                        st.progress(min(max(prog, 0.0), 1.0))
-                                    st.caption(f"SL: {pos['sl']} | TP: {pos['tp']}")
-                                    
-                                    # LOGIC JUAL (Contoh Sederhana)
-                                    # ... (Logic jual sama seperti sebelumnya) ...
+                                # Hitung PnL
+                                pnl = (live_price - pos['buy_price']) * pos['quantity']
+                                pct = (pnl / (pos['buy_price'] * pos['quantity'])) * 100
+                                color = "#00ff00" if pnl >= 0 else "#ff4b4b"
+                                
+                                st.markdown(f"<h3 style='color:{color}; margin:0'>${pnl:.2f} ({pct:.2f}%)</h3>", unsafe_allow_html=True)
+                                
+                                # Progress TP/SL
+                                if pos['tp'] != pos['sl']:
+                                    prog = (live_price - pos['sl']) / (pos['tp'] - pos['sl'])
+                                    st.progress(min(max(prog, 0.0), 1.0))
+                                st.caption(f"🔻 {pos['sl']} | 🎯 {pos['tp']}")
+                                
+                                # LOGIKA JUAL (Contoh)
+                                action = ""
+                                if live_price >= pos['tp']: action = "TP"
+                                elif live_price <= pos['sl']: action = "SL"
+                                
+                                if action:
+                                    st.toast(f"SIGNAL {action}: {pos['symbol']}")
+                                    # Tambahkan logika exchange.create_market_sell_order disini jika mau auto-sell
                             else:
-                                c2.caption("Harga Live"); c2.write("Waiting API...")
-                                st.info("Menunggu koneksi API untuk harga...")
+                                c2.caption("Live"); c2.write("Loading...")
+                                st.spinner("Menunggu API...")
+            
             else:
-                st.info("Tidak ada posisi aktif.")
-
-        # Delay loop
+                st.info("Tidak ada data koin.")
+        
+        # Jeda refresh 5 detik
         time.sleep(5)
