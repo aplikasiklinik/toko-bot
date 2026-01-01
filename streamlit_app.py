@@ -2,20 +2,21 @@ import streamlit as st
 import ccxt
 import pandas as pd
 import pandas_ta as ta
-import plotly.graph_objects as go
 import time
 import json
 import os
 from dotenv import load_dotenv
 from datetime import datetime
 
-# --- 1. CONFIG ---
-st.set_page_config(page_title="Tokocrypto Sync Bot", layout="wide", page_icon="♻️")
+# --- 1. KONFIGURASI HALAMAN ---
+st.set_page_config(page_title="Tokocrypto Ultra Sync", layout="wide", page_icon="♻️")
 st.markdown("""
 <style>
     .stApp { background-color: #0E1117; }
     .stMetric { background-color: #1A1C24; border: 1px solid #333; border-radius: 8px; }
-    .stContainer { background-color: #1A1C24; border: 1px solid #333; border-radius: 8px; padding: 15px; margin-bottom: 10px; }
+    /* Membuat tombol Start/Stop lebih besar */
+    button[kind="primary"] { width: 100%; border: 1px solid #00FF00; }
+    button[kind="secondary"] { width: 100%; border: 1px solid #FF0000; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -48,54 +49,44 @@ def init_exchange(api, secret):
         })
     except: return None
 
-# --- 4. FITUR BARU: AUTO-SYNC WALLET ---
+# --- 4. FITUR SYNC (DIPERBAIKI) ---
 def sync_wallet(exchange, tp_pct, sl_pct):
-    """Mencari koin di dompet yang belum ada di database bot"""
-    found_coins = []
+    found = []
     try:
-        # Ambil semua saldo
         bal = exchange.fetch_balance()
-        items = bal['total']
-        
-        current_db = load_positions()
-        existing_symbols = [p['symbol'] for p in current_db]
-        
-        for currency, amount in items.items():
-            # Filter koin receh (kurang dari 0.0001 diabaikan) dan bukan USDT
-            if amount > 0 and currency not in ['USDT', 'BIDR']:
+        # Cek semua saldo
+        for currency, amount in bal['total'].items():
+            # Hanya ambil jika saldo > 0 dan bukan uang fiat/stablecoin
+            if amount > 0 and currency not in ['USDT', 'BIDR', 'BUSD', 'USDC']:
                 symbol = f"{currency}/USDT"
                 
-                # Cek apakah sudah ada di DB bot?
-                if symbol in existing_symbols:
-                    continue
-                
-                # Cek nilai koin (Apakah > 5 USDT?)
+                # Cek nilai dalam USDT
                 try:
                     ticker = exchange.fetch_ticker(symbol)
                     price = ticker['last']
                     value_usdt = amount * price
                     
-                    if value_usdt > 5.0: # Hanya impor jika nilainya > 5 Dollar
-                        # Karena kita tidak tahu harga beli aslinya, kita anggap harga sekarang sebagai patokan
-                        new_pos = {
-                            'symbol': symbol,
-                            'buy_price': price, # Anggap beli di harga sekarang
-                            'quantity': amount,
-                            'tp': price * (1 + tp_pct/100),
-                            'sl': price * (1 - sl_pct/100)
-                        }
-                        current_db.append(new_pos)
-                        found_coins.append(symbol)
-                except:
-                    continue # Skip jika gagal ambil harga (misal koin delisted)
-        
-        if found_coins:
-            save_positions(current_db)
-            return True, found_coins
-        return False, []
-        
+                    # Minimal nilai $1 agar koin 'debu' tidak masuk
+                    if value_usdt > 1.0: 
+                        # Cek apakah sudah ada di DB bot?
+                        current_db = load_positions()
+                        if not any(p['symbol'] == symbol for p in current_db):
+                            # Masukkan ke DB
+                            new_pos = {
+                                'symbol': symbol,
+                                'buy_price': price, # Anggap harga sekarang sbg entry
+                                'quantity': amount,
+                                'tp': price * (1 + tp_pct/100),
+                                'sl': price * (1 - sl_pct/100)
+                            }
+                            current_db.append(new_pos)
+                            save_positions(current_db)
+                            found.append(symbol)
+                except: pass
+        return found
     except Exception as e:
-        return False, [str(e)]
+        st.error(f"Sync Error: {e}")
+        return []
 
 # --- 5. ANALISA ---
 def get_target_coins(exchange):
@@ -119,132 +110,144 @@ def analyze_coin(exchange, symbol, tf, rsi_limit):
         return {'Symbol': symbol, 'Harga': price, 'RSI': round(rsi, 2), 'Status': status}
     except: return None
 
-# --- SIDEBAR ---
+# --- SIDEBAR (LAYOUT BARU) ---
 load_dotenv()
+ENV_API_KEY = os.getenv('TOKO_API_KEY')
+ENV_SECRET_KEY = os.getenv('TOKO_SECRET_KEY')
+
 with st.sidebar:
-    st.header("🎛️ Panel Kontrol")
+    st.header("🎛️ PANEL KONTROL")
     
-    # API KEY
-    api_key = os.getenv('TOKO_API_KEY')
-    secret_key = os.getenv('TOKO_SECRET_KEY')
-    if not api_key:
-        api_key = st.text_input("API Key", type="password")
-        secret_key = st.text_input("Secret Key", type="password")
-
+    # 1. API KEY (Wajib diisi dulu)
+    api_key = ENV_API_KEY if ENV_API_KEY else st.text_input("API Key", type="password")
+    secret_key = ENV_SECRET_KEY if ENV_SECRET_KEY else st.text_input("Secret Key", type="password")
+    
     st.divider()
+
+    # 2. TOMBOL SYNC (POSISI PALING ATAS & JELAS)
+    st.markdown("### ♻️ DOMPET SINKRONISASI")
+    st.info("Tekan tombol di bawah jika koin yang Anda beli tidak muncul di layar.")
     
-    # --- TOMBOL SAKTI IMPOR SALDO ---
-    st.subheader("♻️ Sinkronisasi Saldo")
-    st.info("Klik tombol ini jika Anda punya koin di Tokocrypto tapi tidak muncul di Bot.")
-    if st.button("🔍 SCAN & IMPOR DOMPET"):
-        # Kita butuh exchange sementara untuk tombol ini
-        tmp_ex = init_exchange(api_key, secret_key)
-        if tmp_ex:
-            is_found, list_coins = sync_wallet(tmp_ex, 1.5, 2.0) # Default TP 1.5%, SL 2%
-            if is_found:
-                st.success(f"Berhasil mengimpor: {', '.join(list_coins)}")
-                time.sleep(1)
-                st.rerun()
+    if st.button("🔍 SCAN DOMPET TOKOCRYPTO SEKARANG", type="primary"):
+        if api_key and secret_key:
+            tmp_ex = init_exchange(api_key, secret_key)
+            if tmp_ex:
+                with st.spinner("Sedang memeriksa dompet Tokocrypto Anda..."):
+                    found = sync_wallet(tmp_ex, 1.5, 2.0) # Default TP 1.5, SL 2
+                
+                if found:
+                    st.success(f"BERHASIL IMPOR: {', '.join(found)}")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.warning("Tidak ditemukan koin baru (Nilai > $1).")
             else:
-                st.warning("Tidak ditemukan koin baru (Nilai > 5 USDT) di dompet.")
+                st.error("Koneksi Gagal.")
         else:
-            st.error("Koneksi API Gagal.")
-    
+            st.error("API Key Belum Diisi!")
+            
     st.divider()
 
-    # SETTING TRADING
-    refresh_rate = st.slider("Kecepatan Refresh (Detik)", 5, 60, 10)
+    # 3. SETTING TRADING
+    st.markdown("### ⚙️ PENGATURAN")
     modal_per_trade = st.number_input("Modal Per Slot (USDT)", 11.0)
-    total_slots = st.number_input("Max Slot", 1, 10, 3)
+    total_slots = st.number_input("Jumlah Slot Max", 1, 10, 3)
     
-    st.caption("TARGET")
-    tp_pct = st.number_input("Take Profit (%)", 1.5)
-    sl_pct = st.number_input("Stop Loss (%)", 2.0)
+    st.caption("TARGET PROFIT/LOSS")
+    c_tp, c_sl = st.columns(2)
+    tp_pct = c_tp.number_input("TP %", 1.5)
+    sl_pct = c_sl.number_input("SL %", 2.0)
     
-    st.caption("STRATEGI")
+    st.caption("STRATEGI RSI")
     tf_sel = st.selectbox("Timeframe", ["15m", "5m"], index=1)
     rsi_lim = st.number_input("RSI Limit (<)", 35)
     
     live_mode = st.toggle("🔴 LIVE TRADING", value=True)
     
-    col1, col2 = st.columns(2)
-    start_btn = col1.button("▶️ START", type="primary", use_container_width=True)
-    stop_btn = col2.button("⏹️ STOP", use_container_width=True)
+    st.divider()
+    
+    # 4. START/STOP
+    st.markdown("### ▶️ OPERASI")
+    refresh_rate = st.slider("Kecepatan Refresh (Detik)", 3, 30, 5)
+    
+    col_play, col_stop = st.columns(2)
+    start_btn = col_play.button("MULAI BOT")
+    stop_btn = col_stop.button("MATIKAN BOT")
 
     if start_btn: st.session_state['active'] = True
     if stop_btn: st.session_state['active'] = False
 
 # --- MAIN UI ---
-st.title("♻️ Tokocrypto Sync & Auto Trade")
+st.title("💎 Tokocrypto Ultra Sync Bot")
 
 if 'active' not in st.session_state: st.session_state['active'] = False
 if 'logs' not in st.session_state: st.session_state['logs'] = []
-if not api_key: st.stop()
+if not api_key: st.warning("Masukkan API Key di Sidebar sebelah kiri."); st.stop()
 
 exchange = init_exchange(api_key, secret_key)
 placeholder = st.empty()
 
+# LOOP UTAMA
 while st.session_state['active']:
     with placeholder.container():
         active_pos = load_positions()
         
-        # 1. INFO BALANCE
+        # 1. INFO KEUANGAN
         try:
             bal = exchange.fetch_balance()
             free_usdt = bal['USDT']['free']
             
-            # Hitung Equity
-            asset_val = 0
+            # Hitung Nilai Aset Koin
+            coin_equity = 0
             for pos in active_pos:
                 try:
                     tk = exchange.fetch_ticker(pos['symbol'])
-                    asset_val += (pos['quantity'] * tk['last'])
+                    coin_equity += (pos['quantity'] * tk['last'])
                 except: pass
             
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Saldo Tunai", f"{free_usdt:.2f} USDT")
-            c2.metric("Total Aset", f"{free_usdt + asset_val:.2f} USDT")
-            c3.metric("Slot", f"{len(active_pos)} / {total_slots}")
-        except: st.error("Gagal ambil saldo.")
+            total_wealth = free_usdt + coin_equity
+            
+            m1, m2, m3 = st.columns(3)
+            m1.metric("💵 Uang Tunai", f"{free_usdt:.2f} USDT")
+            m2.metric("💰 Total Kekayaan", f"{total_wealth:.2f} USDT")
+            m3.metric("🎰 Slot Terpakai", f"{len(active_pos)} / {total_slots}")
+        except: st.error("Gagal mengambil data saldo.")
 
         st.divider()
 
-        # 2. MONITORING
+        # 2. MONITORING POSISI
         if active_pos:
-            st.subheader(f"🔥 Posisi Aktif ({len(active_pos)})")
+            st.subheader(f"🔥 Portofolio Aktif ({len(active_pos)})")
             
-            # Grid layout
             cols = st.columns(3)
             for i, pos in enumerate(active_pos):
                 with cols[i % 3]:
                     with st.container():
+                        st.markdown(f"### {pos['symbol']}")
                         try:
-                            # Data
+                            # Data Live
                             ticker = exchange.fetch_ticker(pos['symbol'])
                             curr_price = ticker['last']
                             entry = pos['buy_price']
+                            qty = pos['quantity']
                             
                             # PnL
-                            qty = pos['quantity']
+                            invested = entry * qty
                             val_now = curr_price * qty
-                            # Estimasi modal awal (jika hasil import, entry = harga saat import)
-                            invested = entry * qty 
                             pnl_usdt = val_now - invested
-                            pnl_pct = ((curr_price - entry) / entry) * 100
                             
-                            st.markdown(f"**{pos['symbol']}**")
+                            # Tampilan
+                            c1, c2 = st.columns(2)
+                            c1.caption("Harga Masuk"); c1.write(f"{entry}")
+                            c2.caption("Harga Kini"); c2.write(f"{curr_price}")
                             
-                            m1, m2 = st.columns(2)
-                            m1.caption("Harga Kini")
-                            m1.write(f"{curr_price}")
-                            m2.caption("Profit/Rugi")
                             color = "green" if pnl_usdt > 0 else "red"
-                            m2.markdown(f":{color}[${pnl_usdt:.2f}]")
-
-                            st.progress(min(max((curr_price - pos['sl']) / (pos['tp'] - pos['sl']), 0.0), 1.0))
-                            st.caption(f"SL: {pos['sl']:.4f} ⟷ TP: {pos['tp']:.4f}")
+                            st.markdown(f"<h4 style='color:{color}'>${pnl_usdt:.3f}</h4>", unsafe_allow_html=True)
                             
-                            # LOGIKA JUAL
+                            st.progress(min(max((curr_price - pos['sl']) / (pos['tp'] - pos['sl']), 0.0), 1.0))
+                            st.caption(f"SL: {pos['sl']:.4f} <---> TP: {pos['tp']:.4f}")
+                            
+                            # Logic Jual
                             action = None
                             if curr_price >= pos['tp']: action = "TP"
                             elif curr_price <= pos['sl']: action = "SL"
@@ -252,22 +255,22 @@ while st.session_state['active']:
                             if action:
                                 if live_mode:
                                     exchange.create_market_sell_order(pos['symbol'], pos['quantity'])
-                                    add_log(f"SOLD {pos['symbol']} ({action})", "sell")
+                                    add_log(f"JUAL {pos['symbol']} ({action})", "sell")
                                 else:
-                                    add_log(f"SIMULASI SOLD {pos['symbol']}", "sell")
+                                    add_log(f"SIMULASI JUAL {pos['symbol']}", "sell")
                                 
-                                # Hapus dari DB
-                                current_db = load_positions()
-                                new_db = [p for p in current_db if p['symbol'] != pos['symbol']]
+                                # Hapus Posisi
+                                new_db = [p for p in active_pos if p['symbol'] != pos['symbol']]
                                 save_positions(new_db)
                                 st.rerun()
 
-                        except Exception as e: st.error(f"Err: {e}")
-        
+                        except: st.warning("Data loading...")
+
         # 3. SCANNING
         if len(active_pos) < total_slots:
             st.divider()
-            st.caption(f"📡 SCANNING... (RSI < {rsi_lim})")
+            st.info(f"📡 SCANNING MARKET (RSI < {rsi_lim})...")
+            
             if free_usdt >= modal_per_trade:
                 targets = get_target_coins(exchange)
                 for sym in targets:
@@ -277,7 +280,7 @@ while st.session_state['active']:
                     if data and data['Status'] == "BUY":
                         sym = data['Symbol']
                         price = data['Harga']
-                        st.success(f"🚀 BUY {sym} @ {price}")
+                        st.success(f"🚀 BUY SIGNAL: {sym} @ {price}")
                         
                         qty = (modal_per_trade / price) * 0.998
                         tp = price * (1 + tp_pct/100)
@@ -290,7 +293,7 @@ while st.session_state['active']:
                                 exchange.create_market_buy_order(sym, modal_per_trade, params)
                                 sukses = True
                                 add_log(f"BUY {sym}", "buy")
-                            except: st.error("Gagal Beli")
+                            except Exception as e: st.error(f"Gagal Beli: {e}")
                         else:
                             sukses = True
                             add_log(f"SIMULASI BUY {sym}", "buy")
@@ -305,7 +308,6 @@ while st.session_state['active']:
             else:
                 st.warning("Saldo tidak cukup untuk slot baru.")
         else:
-            st.info("Slot Penuh.")
+            st.success("🔒 Semua Slot Terisi. Fokus Menjaga Aset.")
 
-    # Jeda Global
     time.sleep(refresh_rate)
